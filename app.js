@@ -9,6 +9,30 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
+// Construir el agente de cookies para @distube/ytdl-core desde variables de entorno
+let ytdlAgent = null;
+if (process.env.YOUTUBE_COOKIES) {
+    try {
+        // Parsear el archivo de cookies Netscape a formato de objeto para ytdl-core
+        const cookieLines = process.env.YOUTUBE_COOKIES
+            .split('\n')
+            .filter(line => line && !line.startsWith('#') && line.includes('youtube.com'));
+        
+        const cookieObjects = cookieLines.map(line => {
+            const parts = line.split('\t');
+            if (parts.length >= 7) {
+                return { name: parts[5], value: parts[6].trim() };
+            }
+            return null;
+        }).filter(Boolean);
+
+        ytdlAgent = ytdl.createAgent(cookieObjects);
+        console.log(`🍪 Agente de cookies creado con ${cookieObjects.length} cookies de YouTube`);
+    } catch (e) {
+        console.error('❌ Error al parsear cookies:', e.message);
+    }
+}
+
 function createToken(query, index) {
     const data = JSON.stringify({ q: query, i: index });
     return Buffer.from(data).toString('base64');
@@ -25,7 +49,8 @@ function decodeToken(base64Token) {
 
 // Función para obtener el URL de audio usando @distube/ytdl-core (funciona en Render sin binarios)
 async function getAudioUrl(videoUrl) {
-    const info = await ytdl.getInfo(videoUrl);
+    const options = ytdlAgent ? { agent: ytdlAgent } : {};
+    const info = await ytdl.getInfo(videoUrl, options);
     const format = ytdl.chooseFormat(info.formats, { 
         quality: 'highestaudio',
         filter: 'audioonly'
