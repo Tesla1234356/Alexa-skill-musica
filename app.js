@@ -56,7 +56,7 @@ async function getAudioUrlFromSoundCloud(query) {
     if (!response.ok) throw new Error(`HTTP Error ${response.status}`);
     
     const data = await response.json();
-    return { url: data.url, title: track.title, thumbnail: track.thumbnail };
+    return { url: data.url, title: track.name, thumbnail: track.thumbnail };
 }
 
 app.get('/', (req, res) => res.send('🚀 Servidor Activo en la Nube GAAAA'));
@@ -175,7 +175,7 @@ app.post('/alexa', async (req, res) => {
                     const response = await fetch(streamApiUrl);
                     if (response.ok) {
                         const data = await response.json();
-                        console.log(`✅ Siguiente en cola: ${nextTrack.title}`);
+                        console.log(`✅ Siguiente en cola: ${nextTrack.name}`);
                         const nextTokenString = createToken(query, nextIndex);
 
                         return res.json({
