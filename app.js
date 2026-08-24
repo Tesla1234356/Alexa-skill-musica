@@ -2,20 +2,12 @@ const express = require('express');
 const play = require('play-dl');
 const yt = require('youtube-dl-exec');
 const cors = require('cors');
-const fs = require('fs');
 
 const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
-
-// TRAMPA DE IDENTIDAD: Crear el archivo de cookies físicamente en el servidor
-if (process.env.YOUTUBE_COOKIES) {
-    const rawCookies = process.env.YOUTUBE_COOKIES.replace(/\\n/g, '\n');
-    fs.writeFileSync('cookies.txt', rawCookies);
-    console.log("🍪 Identidad (Cookies) inyectada con éxito en el servidor");
-}
 
 function createToken(query, index) {
     const data = JSON.stringify({ q: query, i: index });
@@ -31,22 +23,7 @@ function decodeToken(base64Token) {
     }
 }
 
-// Función principal para engañar a YouTube usando yt-dlp
-async function getAudioUrl(videoUrl) {
-    const ytOptions = {
-        getUrl: true,
-        format: 'bestaudio',
-        // ¡LA CLAVE ESTÁ AQUÍ! 
-        // 1. Usar las cookies (Suplantación de identidad)
-        ...(fs.existsSync('cookies.txt') && { cookies: 'cookies.txt' }),
-        // 2. Obligar a usar Node.js para resolver el reto matemático "n-challenge"
-        jsRuntimes: 'node'
-    };
-    
-    return await yt(videoUrl, ytOptions);
-}
-
-app.get('/', (req, res) => res.send('🚀 Servidor Activo GAAAA'));
+app.get('/', (req, res) => res.send('🚀 Servidor Activo (Modo Local/Termux) GAAAA'));
 
 app.post('/alexa', async (req, res) => {
     const requestType = req.body.request.type;
@@ -67,7 +44,7 @@ app.post('/alexa', async (req, res) => {
 
             if (intentName === 'BuscarMusicaIntent') {
                 const query = req.body.request.intent.slots.Cancion.value;
-                console.log(`\n🎤 Alexa pide buscar en YouTube: ${query}`);
+                console.log(`\n🎤 Alexa pide buscar: ${query}`);
 
                 const searchResults = await play.search(query, { limit: 1 });
                 if (!searchResults || searchResults.length === 0) throw new Error("No hay resultados");
@@ -75,8 +52,9 @@ app.post('/alexa', async (req, res) => {
                 const video = searchResults[0];
                 console.log(`🔍 Encontrado: ${video.title}`);
                 
-                const streamUrl = await getAudioUrl(video.url);
-                console.log(`✅ Audio hackeado con éxito: ${video.title}`);
+                // Extracción limpia para IP residencial (Termux)
+                const streamUrl = await yt(video.url, { getUrl: true, format: 'bestaudio' });
+                console.log(`✅ Audio listo: ${video.title}`);
 
                 const tokenString = createToken(query, 0);
 
@@ -120,7 +98,7 @@ app.post('/alexa', async (req, res) => {
                     const searchResults = await play.search(query, { limit: nextIndex + 1 });
                     const nextVideo = searchResults[nextIndex];
                     
-                    const streamUrl = await getAudioUrl(nextVideo.url);
+                    const streamUrl = await yt(nextVideo.url, { getUrl: true, format: 'bestaudio' });
                     const nextTokenString = createToken(query, nextIndex);
 
                     return res.json({
@@ -156,7 +134,7 @@ app.post('/alexa', async (req, res) => {
                 if (searchResults && searchResults.length > nextIndex) {
                     const nextVideo = searchResults[nextIndex];
                     
-                    const streamUrl = await getAudioUrl(nextVideo.url);
+                    const streamUrl = await yt(nextVideo.url, { getUrl: true, format: 'bestaudio' });
                     console.log(`✅ Siguiente en cola: ${nextVideo.title}`);
 
                     const nextTokenString = createToken(query, nextIndex);
