@@ -1,6 +1,8 @@
 const express = require('express');
-const SC = require('soundcloud-scraper');
+const play = require('play-dl');
+const yt = require('youtube-dl-exec');
 const cors = require('cors');
+const fs = require('fs');
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -8,20 +10,12 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Inicializar cliente de SoundCloud
-let scClient = null;
-let scKey = null;
-
-async function initSoundCloud() {
-    try {
-        scKey = await SC.keygen();
-        scClient = new SC.Client(scKey);
-        console.log(`☁️ SoundCloud activado correctamente con API Key`);
-    } catch (e) {
-        console.error('❌ Error al inicializar SoundCloud:', e.message);
-    }
+// TRAMPA DE IDENTIDAD: Crear el archivo de cookies físicamente en el servidor
+if (process.env.YOUTUBE_COOKIES) {
+    const rawCookies = process.env.YOUTUBE_COOKIES.replace(/\\n/g, '\n');
+    fs.writeFileSync('cookies.txt', rawCookies);
+    console.log("🍪 Identidad (Cookies) inyectada con éxito en el servidor");
 }
-initSoundCloud();
 
 function createToken(query, index) {
     const data = JSON.stringify({ q: query, i: index });
@@ -37,29 +31,22 @@ function decodeToken(base64Token) {
     }
 }
 
-// Obtener el URL de audio via SoundCloud
-async function getAudioUrlFromSoundCloud(query) {
-    if (!scClient) throw new Error("SoundCloud no está inicializado");
+// Función principal para engañar a YouTube usando yt-dlp
+async function getAudioUrl(videoUrl) {
+    const ytOptions = {
+        getUrl: true,
+        format: 'bestaudio',
+        // ¡LA CLAVE ESTÁ AQUÍ! 
+        // 1. Usar las cookies (Suplantación de identidad)
+        ...(fs.existsSync('cookies.txt') && { cookies: 'cookies.txt' }),
+        // 2. Obligar a usar Node.js para resolver el reto matemático "n-challenge"
+        jsRuntimes: 'node'
+    };
     
-    // Buscar en SoundCloud
-    const searchResults = await scClient.search(query, 'track');
-    if (!searchResults || searchResults.length === 0) throw new Error("No hay resultados en SoundCloud");
-    
-    const track = searchResults[0];
-    const songInfo = await scClient.getSongInfo(track.url);
-    
-    // SoundCloud usa HLS (.m3u8) o Progressive. Alexa soporta HLS perfectamente.
-    const streamApiUrl = songInfo.streams.hls + '?client_id=' + scKey;
-    
-    // Extraer el link real del JSON de la API
-    const response = await fetch(streamApiUrl);
-    if (!response.ok) throw new Error(`HTTP Error ${response.status}`);
-    
-    const data = await response.json();
-    return { url: data.url, title: track.name, thumbnail: track.thumbnail };
+    return await yt(videoUrl, ytOptions);
 }
 
-app.get('/', (req, res) => res.send('🚀 Servidor Activo en la Nube GAAAA'));
+app.get('/', (req, res) => res.send('🚀 Servidor Activo GAAAA'));
 
 app.post('/alexa', async (req, res) => {
     const requestType = req.body.request.type;
@@ -69,7 +56,7 @@ app.post('/alexa', async (req, res) => {
             return res.json({
                 version: "1.0",
                 response: {
-                    outputSpeech: { type: "PlainText", text: "Bienvenido a tu música en la nube. ¿Qué quieres escuchar?" },
+                    outputSpeech: { type: "PlainText", text: "Bienvenido a tu música. ¿Qué quieres escuchar?" },
                     shouldEndSession: false
                 }
             });
@@ -80,22 +67,28 @@ app.post('/alexa', async (req, res) => {
 
             if (intentName === 'BuscarMusicaIntent') {
                 const query = req.body.request.intent.slots.Cancion.value;
-                console.log(`\n🎤 Alexa pide buscar: ${query}`);
+                console.log(`\n🎤 Alexa pide buscar en YouTube: ${query}`);
 
-                const trackInfo = await getAudioUrlFromSoundCloud(query);
-                console.log(`🎵 Listo para reproducir: ${trackInfo.title}`);
+                const searchResults = await play.search(query, { limit: 1 });
+                if (!searchResults || searchResults.length === 0) throw new Error("No hay resultados");
+
+                const video = searchResults[0];
+                console.log(`🔍 Encontrado: ${video.title}`);
+                
+                const streamUrl = await getAudioUrl(video.url);
+                console.log(`✅ Audio hackeado con éxito: ${video.title}`);
 
                 const tokenString = createToken(query, 0);
 
                 return res.json({
                     version: "1.0",
                     response: {
-                        outputSpeech: { type: "PlainText", text: `Reproduciendo ${trackInfo.title}` },
+                        outputSpeech: { type: "PlainText", text: `Reproduciendo ${video.title}` },
                         directives: [{
                             type: "AudioPlayer.Play",
                             playBehavior: "REPLACE_ALL",
                             audioItem: {
-                                stream: { url: trackInfo.url, token: tokenString, offsetInMilliseconds: 0 }
+                                stream: { url: streamUrl, token: tokenString, offsetInMilliseconds: 0 }
                             }
                         }],
                         shouldEndSession: true
@@ -124,16 +117,10 @@ app.post('/alexa', async (req, res) => {
 
                     console.log(`\n⏭️ Siguiente canción (${nextIndex}) de: ${query}`);
 
-                    // Volver a buscar y coger el siguiente índice
-                    const searchResults = await scClient.search(query, 'track');
-                    if (searchResults.length <= nextIndex) throw new Error("No hay más resultados");
+                    const searchResults = await play.search(query, { limit: nextIndex + 1 });
+                    const nextVideo = searchResults[nextIndex];
                     
-                    const nextTrack = searchResults[nextIndex];
-                    const songInfo = await scClient.getSongInfo(nextTrack.url);
-                    const streamApiUrl = songInfo.streams.hls + '?client_id=' + scKey;
-                    const response = await fetch(streamApiUrl);
-                    const data = await response.json();
-                    
+                    const streamUrl = await getAudioUrl(nextVideo.url);
                     const nextTokenString = createToken(query, nextIndex);
 
                     return res.json({
@@ -143,14 +130,13 @@ app.post('/alexa', async (req, res) => {
                                 type: "AudioPlayer.Play",
                                 playBehavior: "REPLACE_ALL",
                                 audioItem: {
-                                    stream: { url: data.url, token: nextTokenString, offsetInMilliseconds: 0 }
+                                    stream: { url: streamUrl, token: nextTokenString, offsetInMilliseconds: 0 }
                                 }
                             }],
                             shouldEndSession: true
                         }
                     });
                 } catch (e) {
-                    console.error('❌ Error en Next:', e.message);
                     return res.json({ version: "1.0", response: { shouldEndSession: true } });
                 }
             }
@@ -160,43 +146,39 @@ app.post('/alexa', async (req, res) => {
             const currentTokenStr = req.body.request.token;
             const tokenData = decodeToken(currentTokenStr);
 
-            if (tokenData && scClient) {
+            if (tokenData) {
                 const query = tokenData.q;
                 const nextIndex = tokenData.i + 1;
-                console.log(`\n🔄 Autoplay: índice ${nextIndex} para "${query}"...`);
+                console.log(`\n🔄 Autoplay: Buscando índice ${nextIndex} para "${query}"...`);
 
-                const searchResults = await scClient.search(query, 'track');
+                const searchResults = await play.search(query, { limit: nextIndex + 1 });
 
                 if (searchResults && searchResults.length > nextIndex) {
-                    const nextTrack = searchResults[nextIndex];
-                    const songInfo = await scClient.getSongInfo(nextTrack.url);
-                    const streamApiUrl = songInfo.streams.hls + '?client_id=' + scKey;
+                    const nextVideo = searchResults[nextIndex];
                     
-                    const response = await fetch(streamApiUrl);
-                    if (response.ok) {
-                        const data = await response.json();
-                        console.log(`✅ Siguiente en cola: ${nextTrack.name}`);
-                        const nextTokenString = createToken(query, nextIndex);
+                    const streamUrl = await getAudioUrl(nextVideo.url);
+                    console.log(`✅ Siguiente en cola: ${nextVideo.title}`);
 
-                        return res.json({
-                            version: "1.0",
-                            response: {
-                                directives: [{
-                                    type: "AudioPlayer.Play",
-                                    playBehavior: "ENQUEUE",
-                                    audioItem: {
-                                        stream: {
-                                            url: data.url,
-                                            token: nextTokenString,
-                                            expectedPreviousToken: currentTokenStr,
-                                            offsetInMilliseconds: 0
-                                        }
+                    const nextTokenString = createToken(query, nextIndex);
+
+                    return res.json({
+                        version: "1.0",
+                        response: {
+                            directives: [{
+                                type: "AudioPlayer.Play",
+                                playBehavior: "ENQUEUE",
+                                audioItem: {
+                                    stream: {
+                                        url: streamUrl,
+                                        token: nextTokenString,
+                                        expectedPreviousToken: currentTokenStr,
+                                        offsetInMilliseconds: 0
                                     }
-                                }],
-                                shouldEndSession: true
-                            }
-                        });
-                    }
+                                }
+                            }],
+                            shouldEndSession: true
+                        }
+                    });
                 }
             }
             return res.json({ version: "1.0", response: { shouldEndSession: true } });

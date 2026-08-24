@@ -16,7 +16,6 @@
     "express": "^5.2.1",
     "play-dl": "^1.9.7",
     "soundcloud-downloader": "^1.0.0",
-    "soundcloud-scraper": "^5.0.3",
     "youtube-dl-exec": "^3.1.12",
     "youtube-sr": "^4.3.12"
   }
