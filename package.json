@@ -1,0 +1,20 @@
+{
+  "name": "alexa-mood",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "play-dl": "^1.9.7",
+    "youtube-dl-exec": "^3.1.12",
+    "youtube-sr": "^4.3.12"
+  }
+}
