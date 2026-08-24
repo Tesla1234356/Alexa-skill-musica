@@ -1,22 +1,13 @@
 const express = require('express');
 const play = require('play-dl');
-const yt = require('youtube-dl-exec');
+const ytdl = require('@distube/ytdl-core');
 const cors = require('cors');
-const fs = require('fs'); // Módulo agregado para leer/escribir archivos
 
 const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(cors());
 app.use(express.json());
-
-// TRAMPA PARA YOUTUBE: Crear el archivo de cookies físicamente en el servidor
-if (process.env.YOUTUBE_COOKIES) {
-    // Reemplazamos los saltos de línea de texto plano a reales
-    const rawCookies = process.env.YOUTUBE_COOKIES.replace(/\\n/g, '\n');
-    fs.writeFileSync('cookies.txt', rawCookies);
-    console.log("🍪 Cookies de YouTube inyectadas con éxito en el servidor");
-}
 
 function createToken(query, index) {
     const data = JSON.stringify({ q: query, i: index });
@@ -32,12 +23,23 @@ function decodeToken(base64Token) {
     }
 }
 
-app.get('/', (req, res) => res.send('Servidor Activo GAAAA'));
+// Función para obtener el URL de audio usando @distube/ytdl-core (funciona en Render sin binarios)
+async function getAudioUrl(videoUrl) {
+    const info = await ytdl.getInfo(videoUrl);
+    const format = ytdl.chooseFormat(info.formats, { 
+        quality: 'highestaudio',
+        filter: 'audioonly'
+    });
+    return format.url;
+}
+
+app.get('/', (req, res) => res.send('🚀 Servidor Activo GAAAA'));
 
 app.post('/alexa', async (req, res) => {
     const requestType = req.body.request.type;
 
     try {
+        // 1. SALUDO
         if (requestType === 'LaunchRequest') {
             return res.json({
                 version: "1.0",
@@ -48,6 +50,7 @@ app.post('/alexa', async (req, res) => {
             });
         }
 
+        // 2. BUSCAR CANCIÓN
         if (requestType === 'IntentRequest') {
             const intentName = req.body.request.intent.name;
 
@@ -59,15 +62,11 @@ app.post('/alexa', async (req, res) => {
                 if (!searchResults || searchResults.length === 0) throw new Error("No hay resultados");
 
                 const video = searchResults[0];
+                console.log(`🔍 Video encontrado: ${video.title} | ${video.url}`);
                 
-                // Aquí aplicamos la trampa de las cookies al extractor
-                const streamUrl = await yt(video.url, { 
-                    getUrl: true, 
-                    format: 'bestaudio',
-                    ...(fs.existsSync('cookies.txt') && { cookies: 'cookies.txt' })
-                });
-                
+                const streamUrl = await getAudioUrl(video.url);
                 console.log(`✅ Audio listo: ${video.title}`);
+
                 const tokenString = createToken(query, 0);
 
                 return res.json({
@@ -86,6 +85,7 @@ app.post('/alexa', async (req, res) => {
                 });
             }
 
+            // CONTROLES BÁSICOS
             if (intentName === 'AMAZON.PauseIntent' || intentName === 'AMAZON.StopIntent') {
                 return res.json({
                     version: "1.0",
@@ -95,29 +95,24 @@ app.post('/alexa', async (req, res) => {
             if (intentName === 'AMAZON.ResumeIntent') {
                 return res.json({ version: "1.0", response: { shouldEndSession: true } });
             }
-            
+
+            // SALTAR A LA SIGUIENTE CANCIÓN
             if (intentName === 'AMAZON.NextIntent') {
                 try {
                     const currentTokenStr = req.body.context?.AudioPlayer?.token;
                     if (!currentTokenStr) throw new Error("No hay token actual");
-                    
+
                     const tokenData = decodeToken(currentTokenStr);
                     const query = tokenData.q;
                     const nextIndex = tokenData.i + 1;
-                    
+
                     console.log(`\n⏭️ Saltando a la siguiente canción de: ${query}`);
-                    
+
                     const searchResults = await play.search(query, { limit: nextIndex + 1 });
                     const nextVideo = searchResults[nextIndex];
-                    
-                    const streamUrl = await yt(nextVideo.url, { 
-                        getUrl: true, 
-                        format: 'bestaudio',
-                        ...(fs.existsSync('cookies.txt') && { cookies: 'cookies.txt' })
-                    });
-                    
+                    const streamUrl = await getAudioUrl(nextVideo.url);
                     const nextTokenString = createToken(query, nextIndex);
-                    
+
                     return res.json({
                         version: "1.0",
                         response: {
@@ -132,29 +127,27 @@ app.post('/alexa', async (req, res) => {
                         }
                     });
                 } catch (e) {
+                    console.error('❌ Error en Next:', e.message);
                     return res.json({ version: "1.0", response: { shouldEndSession: true } });
                 }
             }
         }
 
+        // 3. AUTOPLAY (cuando está a punto de terminar)
         if (requestType === 'AudioPlayer.PlaybackNearlyFinished') {
             const currentTokenStr = req.body.request.token;
             const tokenData = decodeToken(currentTokenStr);
-            
+
             if (tokenData) {
                 const query = tokenData.q;
                 const nextIndex = tokenData.i + 1;
-                console.log(`\n🔄 Autoplay: Buscando la siguiente canción (Índice ${nextIndex}) para "${query}"...`);
+                console.log(`\n🔄 Autoplay: Buscando índice ${nextIndex} para "${query}"...`);
 
                 const searchResults = await play.search(query, { limit: nextIndex + 1 });
-                
+
                 if (searchResults && searchResults.length > nextIndex) {
                     const nextVideo = searchResults[nextIndex];
-                    const streamUrl = await yt(nextVideo.url, { 
-                        getUrl: true, 
-                        format: 'bestaudio',
-                        ...(fs.existsSync('cookies.txt') && { cookies: 'cookies.txt' })
-                    });
+                    const streamUrl = await getAudioUrl(nextVideo.url);
                     console.log(`✅ Siguiente en cola: ${nextVideo.title}`);
 
                     const nextTokenString = createToken(query, nextIndex);
@@ -181,6 +174,9 @@ app.post('/alexa', async (req, res) => {
             }
             return res.json({ version: "1.0", response: { shouldEndSession: true } });
         }
+
+        // Respuesta genérica para otros eventos de AudioPlayer
+        return res.json({ version: "1.0", response: { shouldEndSession: true } });
 
     } catch (error) {
         console.error('❌ Error general:', error.message);
