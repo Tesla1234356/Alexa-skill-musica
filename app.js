@@ -1,6 +1,5 @@
 const express = require('express');
-const play = require('play-dl');
-const ytdl = require('@distube/ytdl-core');
+const SC = require('soundcloud-scraper');
 const cors = require('cors');
 
 const app = express();
@@ -9,29 +8,20 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json());
 
-// Construir el agente de cookies para @distube/ytdl-core desde variables de entorno
-let ytdlAgent = null;
-if (process.env.YOUTUBE_COOKIES) {
-    try {
-        // Parsear el archivo de cookies Netscape a formato de objeto para ytdl-core
-        const cookieLines = process.env.YOUTUBE_COOKIES
-            .split('\n')
-            .filter(line => line && !line.startsWith('#') && line.includes('youtube.com'));
-        
-        const cookieObjects = cookieLines.map(line => {
-            const parts = line.split('\t');
-            if (parts.length >= 7) {
-                return { name: parts[5], value: parts[6].trim() };
-            }
-            return null;
-        }).filter(Boolean);
+// Inicializar cliente de SoundCloud
+let scClient = null;
+let scKey = null;
 
-        ytdlAgent = ytdl.createAgent(cookieObjects);
-        console.log(`🍪 Agente de cookies creado con ${cookieObjects.length} cookies de YouTube`);
+async function initSoundCloud() {
+    try {
+        scKey = await SC.keygen();
+        scClient = new SC.Client(scKey);
+        console.log(`☁️ SoundCloud activado correctamente con API Key`);
     } catch (e) {
-        console.error('❌ Error al parsear cookies:', e.message);
+        console.error('❌ Error al inicializar SoundCloud:', e.message);
     }
 }
+initSoundCloud();
 
 function createToken(query, index) {
     const data = JSON.stringify({ q: query, i: index });
@@ -47,35 +37,44 @@ function decodeToken(base64Token) {
     }
 }
 
-// Función para obtener el URL de audio usando @distube/ytdl-core (funciona en Render sin binarios)
-async function getAudioUrl(videoUrl) {
-    const options = ytdlAgent ? { agent: ytdlAgent } : {};
-    const info = await ytdl.getInfo(videoUrl, options);
-    const format = ytdl.chooseFormat(info.formats, { 
-        quality: 'highestaudio',
-        filter: 'audioonly'
-    });
-    return format.url;
+// Obtener el URL de audio via SoundCloud
+async function getAudioUrlFromSoundCloud(query) {
+    if (!scClient) throw new Error("SoundCloud no está inicializado");
+    
+    // Buscar en SoundCloud
+    const searchResults = await scClient.search(query, 'track');
+    if (!searchResults || searchResults.length === 0) throw new Error("No hay resultados en SoundCloud");
+    
+    const track = searchResults[0];
+    const songInfo = await scClient.getSongInfo(track.url);
+    
+    // SoundCloud usa HLS (.m3u8) o Progressive. Alexa soporta HLS perfectamente.
+    const streamApiUrl = songInfo.streams.hls + '?client_id=' + scKey;
+    
+    // Extraer el link real del JSON de la API
+    const response = await fetch(streamApiUrl);
+    if (!response.ok) throw new Error(`HTTP Error ${response.status}`);
+    
+    const data = await response.json();
+    return { url: data.url, title: track.title, thumbnail: track.thumbnail };
 }
 
-app.get('/', (req, res) => res.send('🚀 Servidor Activo GAAAA'));
+app.get('/', (req, res) => res.send('🚀 Servidor Activo en la Nube GAAAA'));
 
 app.post('/alexa', async (req, res) => {
     const requestType = req.body.request.type;
 
     try {
-        // 1. SALUDO
         if (requestType === 'LaunchRequest') {
             return res.json({
                 version: "1.0",
                 response: {
-                    outputSpeech: { type: "PlainText", text: "Bienvenido a tu música. ¿Qué quieres escuchar?" },
+                    outputSpeech: { type: "PlainText", text: "Bienvenido a tu música en la nube. ¿Qué quieres escuchar?" },
                     shouldEndSession: false
                 }
             });
         }
 
-        // 2. BUSCAR CANCIÓN
         if (requestType === 'IntentRequest') {
             const intentName = req.body.request.intent.name;
 
@@ -83,26 +82,20 @@ app.post('/alexa', async (req, res) => {
                 const query = req.body.request.intent.slots.Cancion.value;
                 console.log(`\n🎤 Alexa pide buscar: ${query}`);
 
-                const searchResults = await play.search(query, { limit: 1 });
-                if (!searchResults || searchResults.length === 0) throw new Error("No hay resultados");
-
-                const video = searchResults[0];
-                console.log(`🔍 Video encontrado: ${video.title} | ${video.url}`);
-                
-                const streamUrl = await getAudioUrl(video.url);
-                console.log(`✅ Audio listo: ${video.title}`);
+                const trackInfo = await getAudioUrlFromSoundCloud(query);
+                console.log(`🎵 Listo para reproducir: ${trackInfo.title}`);
 
                 const tokenString = createToken(query, 0);
 
                 return res.json({
                     version: "1.0",
                     response: {
-                        outputSpeech: { type: "PlainText", text: `Reproduciendo ${video.title}` },
+                        outputSpeech: { type: "PlainText", text: `Reproduciendo ${trackInfo.title}` },
                         directives: [{
                             type: "AudioPlayer.Play",
                             playBehavior: "REPLACE_ALL",
                             audioItem: {
-                                stream: { url: streamUrl, token: tokenString, offsetInMilliseconds: 0 }
+                                stream: { url: trackInfo.url, token: tokenString, offsetInMilliseconds: 0 }
                             }
                         }],
                         shouldEndSession: true
@@ -110,7 +103,6 @@ app.post('/alexa', async (req, res) => {
                 });
             }
 
-            // CONTROLES BÁSICOS
             if (intentName === 'AMAZON.PauseIntent' || intentName === 'AMAZON.StopIntent') {
                 return res.json({
                     version: "1.0",
@@ -121,7 +113,6 @@ app.post('/alexa', async (req, res) => {
                 return res.json({ version: "1.0", response: { shouldEndSession: true } });
             }
 
-            // SALTAR A LA SIGUIENTE CANCIÓN
             if (intentName === 'AMAZON.NextIntent') {
                 try {
                     const currentTokenStr = req.body.context?.AudioPlayer?.token;
@@ -131,11 +122,18 @@ app.post('/alexa', async (req, res) => {
                     const query = tokenData.q;
                     const nextIndex = tokenData.i + 1;
 
-                    console.log(`\n⏭️ Saltando a la siguiente canción de: ${query}`);
+                    console.log(`\n⏭️ Siguiente canción (${nextIndex}) de: ${query}`);
 
-                    const searchResults = await play.search(query, { limit: nextIndex + 1 });
-                    const nextVideo = searchResults[nextIndex];
-                    const streamUrl = await getAudioUrl(nextVideo.url);
+                    // Volver a buscar y coger el siguiente índice
+                    const searchResults = await scClient.search(query, 'track');
+                    if (searchResults.length <= nextIndex) throw new Error("No hay más resultados");
+                    
+                    const nextTrack = searchResults[nextIndex];
+                    const songInfo = await scClient.getSongInfo(nextTrack.url);
+                    const streamApiUrl = songInfo.streams.hls + '?client_id=' + scKey;
+                    const response = await fetch(streamApiUrl);
+                    const data = await response.json();
+                    
                     const nextTokenString = createToken(query, nextIndex);
 
                     return res.json({
@@ -145,7 +143,7 @@ app.post('/alexa', async (req, res) => {
                                 type: "AudioPlayer.Play",
                                 playBehavior: "REPLACE_ALL",
                                 audioItem: {
-                                    stream: { url: streamUrl, token: nextTokenString, offsetInMilliseconds: 0 }
+                                    stream: { url: data.url, token: nextTokenString, offsetInMilliseconds: 0 }
                                 }
                             }],
                             shouldEndSession: true
@@ -158,49 +156,52 @@ app.post('/alexa', async (req, res) => {
             }
         }
 
-        // 3. AUTOPLAY (cuando está a punto de terminar)
         if (requestType === 'AudioPlayer.PlaybackNearlyFinished') {
             const currentTokenStr = req.body.request.token;
             const tokenData = decodeToken(currentTokenStr);
 
-            if (tokenData) {
+            if (tokenData && scClient) {
                 const query = tokenData.q;
                 const nextIndex = tokenData.i + 1;
-                console.log(`\n🔄 Autoplay: Buscando índice ${nextIndex} para "${query}"...`);
+                console.log(`\n🔄 Autoplay: índice ${nextIndex} para "${query}"...`);
 
-                const searchResults = await play.search(query, { limit: nextIndex + 1 });
+                const searchResults = await scClient.search(query, 'track');
 
                 if (searchResults && searchResults.length > nextIndex) {
-                    const nextVideo = searchResults[nextIndex];
-                    const streamUrl = await getAudioUrl(nextVideo.url);
-                    console.log(`✅ Siguiente en cola: ${nextVideo.title}`);
+                    const nextTrack = searchResults[nextIndex];
+                    const songInfo = await scClient.getSongInfo(nextTrack.url);
+                    const streamApiUrl = songInfo.streams.hls + '?client_id=' + scKey;
+                    
+                    const response = await fetch(streamApiUrl);
+                    if (response.ok) {
+                        const data = await response.json();
+                        console.log(`✅ Siguiente en cola: ${nextTrack.title}`);
+                        const nextTokenString = createToken(query, nextIndex);
 
-                    const nextTokenString = createToken(query, nextIndex);
-
-                    return res.json({
-                        version: "1.0",
-                        response: {
-                            directives: [{
-                                type: "AudioPlayer.Play",
-                                playBehavior: "ENQUEUE",
-                                audioItem: {
-                                    stream: {
-                                        url: streamUrl,
-                                        token: nextTokenString,
-                                        expectedPreviousToken: currentTokenStr,
-                                        offsetInMilliseconds: 0
+                        return res.json({
+                            version: "1.0",
+                            response: {
+                                directives: [{
+                                    type: "AudioPlayer.Play",
+                                    playBehavior: "ENQUEUE",
+                                    audioItem: {
+                                        stream: {
+                                            url: data.url,
+                                            token: nextTokenString,
+                                            expectedPreviousToken: currentTokenStr,
+                                            offsetInMilliseconds: 0
+                                        }
                                     }
-                                }
-                            }],
-                            shouldEndSession: true
-                        }
-                    });
+                                }],
+                                shouldEndSession: true
+                            }
+                        });
+                    }
                 }
             }
             return res.json({ version: "1.0", response: { shouldEndSession: true } });
         }
 
-        // Respuesta genérica para otros eventos de AudioPlayer
         return res.json({ version: "1.0", response: { shouldEndSession: true } });
 
     } catch (error) {
